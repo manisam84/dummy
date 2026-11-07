@@ -10,12 +10,13 @@ final class Config {
     private Config() { }
 
     static final String PREFS = "prefs";
-    static final String TARGET_PKG = "target_pkg";
+    static final String TARGET_PKG = "target_pkg";   // app picked on this device (used when sync is off, and as the first app in Firebase)
     static final String PROJECT = "fb_project";
     static final String API_KEY = "fb_key";
     static final String CODE = "fb_code";
     static final String DEVICE_ID = "device_id";
-    static final String NOTIFIED_DAY = "notified_day";
+    static final String APPS_CACHE = "apps_cache";    // last app list read from Firebase
+    static final String INTERVAL = "interval_min";    // last check interval read from Firebase
 
     private static SharedPreferences prefs(Context c) {
         return c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
@@ -42,5 +43,14 @@ final class Config {
             set(c, DEVICE_ID, id);
         }
         return id;
+    }
+
+    /** Check interval in minutes last read from Firebase (never below Android's 15 minute minimum). */
+    static long intervalMinutes(Context c) {
+        try {
+            return Math.max(15, Long.parseLong(get(c, INTERVAL)));
+        } catch (NumberFormatException e) {
+            return 15;
+        }
     }
 }

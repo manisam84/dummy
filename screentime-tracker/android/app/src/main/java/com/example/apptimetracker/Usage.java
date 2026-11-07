@@ -11,8 +11,14 @@ import android.os.Process;
 
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
+import java.util.Collection;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 
 /** Reads app usage from Android and helps with device/app basics. Shared by the screen and the background job. */
 final class Usage {
@@ -61,47 +67,57 @@ final class Usage {
     }
 
     /**
-     * Exact foreground time for pkg, computed from foreground/background events.
+     * Exact foreground time for each package, computed from foreground/background events
+     * in a single pass over the last 7 days.
      *
-     * @return {todayMs, weekMs}, or null if usage data could not be read
+     * @return package -> {todayMs, weekMs}, or null if usage data could not be read
      */
     @SuppressWarnings("deprecation")
-    static long[] foregroundMs(Context c, String pkg) {
+    static Map<String, long[]> foregroundMs(Context c, Collection<String> pkgs) {
         long now = System.currentTimeMillis();
         long dayStart = startOfDay(0);
         long weekStart = startOfDay(6);
+
+        Map<String, long[]> out = new LinkedHashMap<>();
+        for (String p : pkgs) out.put(p, new long[2]);
+        if (out.isEmpty()) return out;
+
         try {
             UsageStatsManager usm = (UsageStatsManager) c.getSystemService(Context.USAGE_STATS_SERVICE);
             UsageEvents events = usm.queryEvents(weekStart, now);
             if (events == null) return null;
 
+            Map<String, Long> start = new HashMap<>();
+            Set<String> seen = new HashSet<>();
             UsageEvents.Event e = new UsageEvents.Event();
-            long[] totals = new long[2]; // [today, week]
-            long start = -1;
-            boolean first = true;
 
             while (events.hasNextEvent()) {
                 events.getNextEvent(e);
-                if (!pkg.equals(e.getPackageName())) continue;
+                String pkg = e.getPackageName();
+                long[] totals = out.get(pkg);
+                if (totals == null) continue;
                 int type = e.getEventType();
                 long ts = e.getTimeStamp();
+                Long st = start.get(pkg);
 
                 if (type == UsageEvents.Event.MOVE_TO_FOREGROUND) {
-                    if (start < 0) start = ts;
+                    if (st == null) start.put(pkg, ts);
                 } else if (type == UsageEvents.Event.MOVE_TO_BACKGROUND) {
                     // First event is "went to background": it was already open when the window began.
-                    if (start < 0 && first) start = weekStart;
-                    if (start >= 0) {
-                        add(totals, start, ts, dayStart);
-                        start = -1;
+                    if (st == null && !seen.contains(pkg)) st = weekStart;
+                    if (st != null) {
+                        add(totals, st, ts, dayStart);
+                        start.remove(pkg);
                     }
                 } else {
                     continue;
                 }
-                first = false;
+                seen.add(pkg);
             }
-            if (start >= 0) add(totals, start, now, dayStart); // still open right now
-            return totals;
+            for (Map.Entry<String, Long> en : start.entrySet()) {
+                add(out.get(en.getKey()), en.getValue(), now, dayStart); // still open right now
+            }
+            return out;
         } catch (SecurityException ex) {
             return null;
         }

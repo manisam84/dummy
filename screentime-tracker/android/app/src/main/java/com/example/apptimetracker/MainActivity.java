@@ -30,9 +30,8 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.regex.Pattern;
 
 /**
- * Shows how much time a chosen app (default: YouTube) was used on THIS device,
- * labels the device as TV or Mobile, and (optionally) shares the numbers with
- * your other devices through Firebase.
+ * Shows how much time the tracked apps (default: YouTube) were used on THIS device, labels the device
+ * as TV or Mobile, and (optionally) shares the numbers with your other devices through Firebase.
  */
 public class MainActivity extends Activity {
 
@@ -41,8 +40,8 @@ public class MainActivity extends Activity {
     private boolean isTv;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
 
-    private TextView deviceView, appView, todayView, weekView, othersView, limitView, noteView;
-    private Button grantButton, updateButton, chooseButton, syncButton, limitButton;
+    private TextView deviceView, appsView, noteView;
+    private Button grantButton, updateButton, chooseButton, syncButton;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -63,7 +62,7 @@ public class MainActivity extends Activity {
         super.onResume();
         refreshLocal(); // just this device, no network; also runs when coming back from Settings
         if (Config.syncConfigured(this) && Usage.hasAccess(this)) {
-            SyncJobService.schedule(this); // background check about every 15 minutes
+            SyncJobService.ensureSchedule(this, Config.intervalMinutes(this));
         } else {
             SyncJobService.cancel(this);
         }
@@ -92,30 +91,20 @@ public class MainActivity extends Activity {
         root.setGravity(Gravity.CENTER_HORIZONTAL);
 
         deviceView = text(18 * scale, "#FF3355", true);
-        appView = text(30 * scale, "#FFFFFF", true);
-        todayView = text(26 * scale, "#FFFFFF", false);
-        weekView = text(26 * scale, "#FFFFFF", false);
-        othersView = text(16 * scale, "#DDDDDD", false);
-        limitView = text(16 * scale, "#FFCC66", false);
+        appsView = text(18 * scale, "#FFFFFF", false);
         noteView = text(14 * scale, "#AAAAAA", false);
 
         grantButton = button("Grant Usage access", v -> openUsageAccessSettings());
         updateButton = button("Update usage", v -> updateNow());
-        chooseButton = button("Choose app", v -> showAppPicker());
+        chooseButton = button("Add / choose app", v -> showAppPicker());
         syncButton = button("Sync settings", v -> showSyncDialog());
-        limitButton = button("Set daily limit", v -> showLimitDialog());
 
         root.addView(deviceView);
-        root.addView(appView);
-        root.addView(todayView);
-        root.addView(weekView);
         root.addView(updateButton);
         root.addView(grantButton);
-        root.addView(othersView);
-        root.addView(limitView);
-        root.addView(limitButton);
-        root.addView(syncButton);
+        root.addView(appsView);
         root.addView(chooseButton);
+        root.addView(syncButton);
         root.addView(noteView);
 
         ScrollView scroll = new ScrollView(this);
@@ -163,19 +152,8 @@ public class MainActivity extends Activity {
         // First-run flow: focus the required step; afterwards "Update usage" (matters for TV remotes)
         (access ? updateButton : grantButton).requestFocus();
 
-        final String pkg = Usage.targetPackage(this);
-        if (pkg == null) {
-            appView.setText("No app selected");
-            todayView.setText("");
-            weekView.setText("");
-            noteView.setText("Tap \"Choose app\" to pick the app you want to track.");
-            return;
-        }
-        appView.setText(Usage.label(this, pkg));
-
         if (!access) {
-            todayView.setText("");
-            weekView.setText("");
+            appsView.setText("");
             noteView.setText("One-time step: tap \"Grant Usage access\", find \"App Time Tracker\" "
                     + "in the list and switch it on. Then come back.");
             return;
@@ -184,71 +162,102 @@ public class MainActivity extends Activity {
         noteView.setText("Tap \"Update usage\" to refresh the numbers"
                 + (Config.syncConfigured(this) ? " and sync with your other devices." : "."));
         runOnBackground(() -> {
-            final long[] usage = Usage.foregroundMs(this, pkg);
-            runOnUiThread(() -> showLocal(pkg, usage));
+            final List<SyncManager.TrackedApp> apps = SyncManager.trackedApps(this);
+            final Map<String, long[]> usage = Usage.foregroundMs(this, packagesOf(apps));
+            runOnUiThread(() -> showLocal(apps, usage));
         });
     }
 
-    private void showLocal(String pkg, long[] usage) {
-        if (isFinishing() || !pkg.equals(Usage.targetPackage(this))) return;
+    private static List<String> packagesOf(List<SyncManager.TrackedApp> apps) {
+        List<String> pkgs = new ArrayList<>();
+        for (SyncManager.TrackedApp a : apps) pkgs.add(a.pkg);
+        return pkgs;
+    }
+
+    private void showLocal(List<SyncManager.TrackedApp> apps, Map<String, long[]> usage) {
+        if (isFinishing()) return;
+        if (apps.isEmpty()) {
+            appsView.setText("No app selected");
+            noteView.setText("Tap \"Add / choose app\" to pick the app you want to track.");
+            return;
+        }
         if (usage == null) {
-            todayView.setText("");
-            weekView.setText("");
+            appsView.setText("");
             noteView.setText("Could not read usage data. Check that Usage access is on.");
             return;
         }
-        todayView.setText("Today: " + Usage.format(usage[0]));
-        weekView.setText("Last 7 days: " + Usage.format(usage[1]));
+        StringBuilder sb = new StringBuilder();
+        for (SyncManager.TrackedApp a : apps) {
+            long[] u = usage.get(a.pkg);
+            if (u == null) u = new long[2];
+            sb.append(a.name).append("\nToday: ").append(Usage.format(u[0]))
+                    .append("   •   Last 7 days: ").append(Usage.format(u[1])).append("\n\n");
+        }
+        appsView.setText(sb.toString().trim());
     }
 
     /** The "Update usage" button: re-read this device, and sync if Firebase is set up. */
     private void updateNow() {
-        final String pkg = Usage.targetPackage(this);
-        if (pkg == null || !Usage.hasAccess(this)) { refreshLocal(); return; }
+        if (!Usage.hasAccess(this)) { refreshLocal(); return; }
 
         updateButton.setEnabled(false);
         noteView.setText("Updating…");
         runOnBackground(() -> {
-            final long[] usage = Usage.foregroundMs(this, pkg);
-            final SyncManager.Summary summary = (usage != null && Config.syncConfigured(this))
-                    ? SyncManager.sync(this, pkg, usage) : null;
+            final SyncManager.Summary summary = Config.syncConfigured(this) ? SyncManager.sync(this) : null;
+            final List<SyncManager.TrackedApp> apps = SyncManager.trackedApps(this);
+            // Without a successful sync, show at least this device's own numbers
+            final Map<String, long[]> usage = (summary == null || summary.error != null)
+                    ? Usage.foregroundMs(this, packagesOf(apps)) : null;
             runOnUiThread(() -> {
                 if (isFinishing()) return;
                 updateButton.setEnabled(true);
-                showLocal(pkg, usage);
-                if (usage == null) return;
                 if (summary == null) {
+                    showLocal(apps, usage == null ? Collections.<String, long[]>emptyMap() : usage);
                     noteView.setText("Updated. Tap \"Sync settings\" to share with your other devices.");
+                } else if (summary.error != null) {
+                    showLocal(apps, usage);
+                    noteView.setText("Sync problem: " + summary.error);
                 } else {
                     showSummary(summary);
+                    SyncJobService.ensureSchedule(this, summary.intervalMinutes);
                 }
             });
         });
     }
 
     private void showSummary(SyncManager.Summary s) {
-        if (s.error != null) {
-            noteView.setText("Sync problem: " + s.error);
+        if (s.apps.isEmpty()) {
+            appsView.setText("No apps in Firebase yet.");
+            noteView.setText("Tap \"Add / choose app\", or add one in the Firebase console.");
             return;
         }
         StringBuilder sb = new StringBuilder();
         long now = System.currentTimeMillis();
-        for (SyncManager.Row r : s.devices) {
-            long mins = Math.max(0, (now - r.updatedAt) / 60_000);
-            sb.append("tv".equals(r.type) ? "📺 TV" : "📱 Mobile").append(" – ").append(r.name)
-                    .append(r.me ? " (this device)" : "").append("\n")
-                    .append(r.app).append(": ").append(Usage.format(r.todayMs)).append(" today, ")
-                    .append(Usage.format(r.weekMs)).append(" this week")
-                    .append(r.me ? "" : " (updated " + (mins < 1 ? "just now" : mins + " min ago") + ")")
-                    .append("\n\n");
+        for (SyncManager.AppResult a : s.apps) {
+            sb.append(a.name).append("\n");
+            for (SyncManager.DeviceRow r : a.rows) {
+                long mins = Math.max(0, (now - r.updatedAt) / 60_000);
+                sb.append("tv".equals(r.type) ? "📺 " : "📱 ").append(r.deviceName)
+                        .append(r.me ? " (this device)" : "").append(": ")
+                        .append(Usage.format(r.todayMs)).append(" today, ")
+                        .append(Usage.format(r.weekMs)).append(" this week")
+                        .append(r.me ? "" : " (updated " + (mins < 1 ? "just now" : mins + " min ago") + ")")
+                        .append("\n");
+            }
+            sb.append("Combined today: ").append(Usage.format(a.combinedTodayMs));
+            if (a.limitMinutes > 0) {
+                long limitMs = a.limitMinutes * 60_000L;
+                sb.append(" of ").append(Usage.format(limitMs)).append(" limit (")
+                        .append(a.combinedTodayMs * 100 / limitMs).append("%)");
+            } else {
+                sb.append(" (no limit set)");
+            }
+            sb.append("\n\n");
         }
-        sb.append("Combined today: ").append(Usage.format(s.combinedTodayMs));
-        othersView.setText(sb.toString());
-
-        limitView.setText(s.limitMinutes > 0
-                ? "Daily limit (all devices combined): " + Usage.format(s.limitMinutes * 60_000L)
-                : "No daily limit set.");
-        noteView.setText(s.notified ? "Limit reached – notification sent." : "Synced.");
+        appsView.setText(sb.toString().trim());
+        noteView.setText((s.notifications > 0 ? "Notification shown. " : "Synced. ")
+                + "Background check every " + s.intervalMinutes + " min"
+                + (s.warnPercent > 0 ? ", warning at " + s.warnPercent + "%." : "."));
     }
 
     private void runOnBackground(Runnable r) {
@@ -296,38 +305,10 @@ public class MainActivity extends Activity {
                     Config.set(this, Config.PROJECT, project.getText().toString().trim());
                     Config.set(this, Config.API_KEY, key.getText().toString().trim());
                     Config.set(this, Config.CODE, c);
-                    onResume(); // reschedule background job
+                    onResume(); // reschedule the background job
                     noteView.setText(Config.syncConfigured(this)
                             ? "Saved. Tap \"Update usage\" to sync."
                             : "Fill in all three fields to turn on sync.");
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    private void showLimitDialog() {
-        if (!Config.syncConfigured(this)) {
-            noteView.setText("Set up \"Sync settings\" first. The limit is stored in Firebase.");
-            return;
-        }
-        final EditText minutes = field("Minutes per day, all devices combined (0 = no limit)", "",
-                InputType.TYPE_CLASS_NUMBER);
-        new AlertDialog.Builder(this)
-                .setTitle("Daily limit")
-                .setView(minutes)
-                .setPositiveButton("Save", (d, w) -> {
-                    String t = minutes.getText().toString().trim();
-                    if (t.isEmpty() || t.length() > 6) { noteView.setText("Enter a number of minutes."); return; }
-                    final long m = Long.parseLong(t);
-                    noteView.setText("Saving limit…");
-                    runOnBackground(() -> {
-                        final String err = SyncManager.saveLimit(this, m);
-                        runOnUiThread(() -> {
-                            if (isFinishing()) return;
-                            if (err != null) noteView.setText("Could not save limit: " + err);
-                            else updateNow();
-                        });
-                    });
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
@@ -337,13 +318,15 @@ public class MainActivity extends Activity {
 
     private void showAppPicker() {
         PackageManager pm = getPackageManager();
-        final Map<String, String> apps = new LinkedHashMap<>(); // label -> package
+        // list text -> {app name, package}
+        final Map<String, String[]> apps = new LinkedHashMap<>();
         for (String category : new String[]{Intent.CATEGORY_LAUNCHER, Intent.CATEGORY_LEANBACK_LAUNCHER}) {
             Intent i = new Intent(Intent.ACTION_MAIN).addCategory(category);
             for (ResolveInfo ri : pm.queryIntentActivities(i, 0)) {
                 String pkg = ri.activityInfo.packageName;
                 if (pkg.equals(getPackageName())) continue;
-                apps.put(ri.loadLabel(pm).toString() + "  (" + pkg + ")", pkg);
+                String name = ri.loadLabel(pm).toString();
+                apps.put(name + "  (" + pkg + ")", new String[]{name, pkg});
             }
         }
         final List<String> labels = new ArrayList<>(apps.keySet());
@@ -355,8 +338,21 @@ public class MainActivity extends Activity {
         new AlertDialog.Builder(this)
                 .setTitle("Track which app?")
                 .setItems(labels.toArray(new String[0]), (d, which) -> {
-                    Config.set(this, Config.TARGET_PKG, apps.get(labels.get(which)));
-                    refreshLocal();
+                    final String[] picked = apps.get(labels.get(which));
+                    Config.set(this, Config.TARGET_PKG, picked[1]);
+                    if (!Config.syncConfigured(this)) {
+                        refreshLocal();
+                        return;
+                    }
+                    noteView.setText("Adding to Firebase…");
+                    runOnBackground(() -> {
+                        final String problem = SyncManager.addApp(this, picked[0], picked[1]);
+                        runOnUiThread(() -> {
+                            if (isFinishing()) return;
+                            if (problem != null) noteView.setText(problem);
+                            else updateNow();
+                        });
+                    });
                 })
                 .show();
     }

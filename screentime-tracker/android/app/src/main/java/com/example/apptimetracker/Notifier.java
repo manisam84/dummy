@@ -8,14 +8,15 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
 
-/** Shows the "limit reached" notification. */
+/** Shows the "warning" and "limit reached" notifications. */
 final class Notifier {
     private Notifier() { }
 
     private static final String CHANNEL = "limit_alerts";
 
+    /** @param id a number that is the same for the same app + kind, so alerts for different apps don't replace each other */
     @SuppressWarnings("deprecation")
-    static void showLimitReached(Context c, String text) {
+    static void show(Context c, int id, String title, String text) {
         NotificationManager nm = (NotificationManager) c.getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm == null) return;
 
@@ -32,13 +33,13 @@ final class Notifier {
         PendingIntent open = PendingIntent.getActivity(c, 0, new Intent(c, MainActivity.class), flags);
 
         b.setSmallIcon(R.drawable.ic_stat)
-                .setContentTitle("Usage limit reached")
+                .setContentTitle(title)
                 .setContentText(text)
                 .setStyle(new Notification.BigTextStyle().bigText(text))
                 .setContentIntent(open)
                 .setAutoCancel(true);
         try {
-            nm.notify(1001, b.build());
+            nm.notify(id, b.build());
         } catch (SecurityException ignored) {
             // Notification permission not granted; nothing else we can do here.
         }

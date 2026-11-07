@@ -58,56 +58,79 @@ screentime-tracker/
   index.html                         Old web prototype
 ```
 
-## Share usage between phone and TV (Firebase, free)
+## Share usage between devices (Firebase, free)
 
-Optional. Without it, each device just shows its own numbers.
+Optional. Without it, each device just shows its own numbers for the app it tracks.
+With it, all your phones and TVs upload their usage under one **pairing code**, every device sees
+everyone's numbers, and limits, warnings and the check interval come from Firebase.
 
-**One-time setup in a browser (about 5 minutes):**
+### One-time setup in a browser (about 5 minutes)
 1. Go to https://console.firebase.google.com and sign in with a Google account.
-2. **Create a project** (any name; you can turn Google Analytics off). Stay on the free **Spark** plan.
-3. In the left menu choose **Build → Firestore Database → Create database**. Pick any location and
-   **Start in production mode**.
-4. Open the **Rules** tab, replace everything with the rules below, and press **Publish**:
+2. **Create a project** (any name; Google Analytics can be off). Stay on the free **Spark** plan.
+3. **Build → Firestore Database → Create database.** Pick any location, **production mode**.
+4. Open the **Rules** tab, replace everything with this, and press **Publish**:
    ```
    rules_version = '2';
    service cloud.firestore {
      match /databases/{db}/documents {
        match /sync/{code} {
          allow get, write: if true;
-         match /devices/{id} {
+         match /{collection}/{doc} {
            allow get, list, write: if true;
          }
        }
      }
    }
    ```
-5. Click the gear icon → **Project settings → General**. Copy the **Project ID** and the **Web API Key**.
+5. Gear icon → **Project settings → General**. Copy the **Project ID** and the **Web API Key**.
    (If no Web API key is shown, click **Add app → Web (</>)**, register any name, then look again.)
 
-**In the app, on each device:** tap **Sync settings** and enter the Project ID, the Web API Key and the
-same **pairing code** (make it long and random, for example `mani-7f3k9x2q`). Then tap **Update usage**.
+### On each device
+Tap **Sync settings** and enter the Project ID, the Web API Key and the **same pairing code** on every
+device (make it long and random, e.g. `mani-7f3k9x2q`). Then tap **Update usage**.
+You can use several phones and a TV with the same code.
 
-**Daily limit:** tap **Set daily limit** and enter minutes. The limit is stored in Firebase
-(`sync/<your code>` → `limitMinutes`), so you can also change it there. It applies to the
-**combined** time of all your devices.
+### Settings that live in Firebase
+Everything is under `sync` → your pairing code. Edit these in the Firebase console
+(Firestore Database → Data). Number fields must be of type **number**, text fields of type **string**.
+
+**1. Settings for all devices** – document `sync/<your code>`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `checkIntervalMinutes` | number | How often each device checks in the background. Android's minimum is **15**; smaller values count as 15. Default 15. |
+| `warnPercent` | number | Warn at this percentage of each app's limit, e.g. `80`. `0` or missing = no warning. |
+
+**2. Apps** – one document per app in `sync/<your code>/apps/<app id>`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | string | Shown name, e.g. `YouTube` |
+| `mobilePackage` | string | Android package on phones, e.g. `com.google.android.youtube` |
+| `tvPackage` | string | Android package on TVs, e.g. `com.google.android.youtube.tv` |
+| `limitMinutes` | number | Daily limit for this app, **all devices combined**. Missing or `0` = no limit. |
+
+The app also fills this list for you: **Add / choose app** on any device adds the app to Firebase for that
+device type (phone or TV). Picking an app never overwrites a package that is already set. Limits are
+not set from the app; add `limitMinutes` in the console.
+The fields `warnDay`, `warnText`, `alertDay`, `alertText` are written by the app; leave them alone.
+
+The first device that syncs against an empty list adds the app it is already tracking (YouTube by default).
 
 ### Notifications
-
-When the combined time for today reaches the limit, every device shows a "Usage limit reached"
-notification, once per day.
-
-- The check runs in the background about **every 15 minutes** on each device, so an alert can arrive up to
-  about 15 minutes late. (Instant push messages need paid Firebase server code; this stays free.)
-- The device that crosses the limit only notices when its own check runs, or when you tap **Update usage**.
-- If you raise the limit after an alert already fired today, there is no second alert until tomorrow.
-- On Android 13 or newer, allow notifications when asked. Android may pause background checks on devices
-  in battery-saver mode.
+- When an app's combined time today reaches `warnPercent` of its limit, every device shows a warning;
+  when it reaches the limit, every device shows a "Usage limit reached" notification.
+  Each alert shows once per day per app, on each device.
+- Checks run in the background about every `checkIntervalMinutes`, so an alert can arrive that much late.
+  A change to the interval is picked up the next time a device syncs. (Instant push messages need paid
+  Firebase server code; this stays free.)
+- Raising the limit after an alert already fired today does not fire it again until tomorrow.
+- On Android 13 or newer, allow notifications when asked. Battery-saver modes can delay background checks.
 
 ### Privacy
-
-Only these numbers are uploaded: device type and model, the tracked app's name, and today's and the
-week's minutes. Anyone who knows your project ID, API key **and** pairing code could read or change them,
-so keep the code private.
+Uploaded: device type and model, app names and packages, and today's and the week's minutes.
+Anyone who knows your project ID, API key **and** pairing code can read or change them, so keep the
+code private.
 
 ## Updating and TV notes
 

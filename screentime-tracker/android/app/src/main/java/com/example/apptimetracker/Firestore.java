@@ -10,11 +10,28 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 /** Minimal Firestore client using its public web (REST) API. No Firebase library needed. */
 final class Firestore {
+    /** One document: its id (last part of its path) and its typed "fields" JSON. */
+    static final class Doc {
+        final String id;
+        final JSONObject fields;
+        Doc(String id, JSONObject fields) { this.id = id; this.fields = fields; }
+    }
+
+    /** One create-or-update of the given fields. Values: String, Long or Integer. */
+    static final class Write {
+        final String path;
+        final Map<String, Object> values;
+        Write(String path, Map<String, Object> values) { this.path = path; this.values = values; }
+    }
+
     private final String project;
     private final String apiKey;
 
@@ -40,45 +57,67 @@ final class Firestore {
         }
     }
 
-    /** Returns the "fields" object of every document in a collection. */
-    JSONArray listFields(String collectionPath) throws IOException {
-        String body = request("GET", "https://firestore.googleapis.com/v1/" + root() + "/"
-                + collectionPath + "?pageSize=50&key=" + apiKey, null);
-        JSONArray out = new JSONArray();
-        if (body == null) return out;
-        try {
-            JSONArray docs = new JSONObject(body).optJSONArray("documents");
-            if (docs == null) return out;
-            for (int i = 0; i < docs.length(); i++) {
-                JSONObject f = docs.getJSONObject(i).optJSONObject("fields");
-                out.put(f == null ? new JSONObject() : f);
+    /** Returns every document in a collection (follows page tokens). */
+    List<Doc> list(String collectionPath) throws IOException {
+        List<Doc> out = new ArrayList<>();
+        String token = "";
+        for (int page = 0; page < 20; page++) {
+            String url = "https://firestore.googleapis.com/v1/" + root() + "/" + collectionPath
+                    + "?pageSize=300&key=" + apiKey
+                    + (token.isEmpty() ? "" : "&pageToken=" + URLEncoder.encode(token, "UTF-8"));
+            String body = request("GET", url, null);
+            if (body == null) break;
+            try {
+                JSONObject rootObj = new JSONObject(body);
+                JSONArray docs = rootObj.optJSONArray("documents");
+                if (docs != null) {
+                    for (int i = 0; i < docs.length(); i++) {
+                        JSONObject d = docs.getJSONObject(i);
+                        String name = d.optString("name", "");
+                        JSONObject f = d.optJSONObject("fields");
+                        out.add(new Doc(name.substring(name.lastIndexOf('/') + 1),
+                                f == null ? new JSONObject() : f));
+                    }
+                }
+                token = rootObj.optString("nextPageToken", "");
+            } catch (JSONException e) {
+                throw new IOException("Bad response: " + e.getMessage());
             }
-            return out;
-        } catch (JSONException e) {
-            throw new IOException("Bad response: " + e.getMessage());
+            if (token.isEmpty()) break;
         }
+        return out;
     }
 
-    /** Creates or updates only the given fields of a document. Values: String, Long or Integer. */
+    /** Creates or updates only the given fields of one document. */
     void write(String docPath, Map<String, Object> values) throws IOException {
+        List<Write> one = new ArrayList<>();
+        one.add(new Write(docPath, values));
+        commit(one);
+    }
+
+    /** Applies several writes in one request. */
+    void commit(List<Write> writes) throws IOException {
+        if (writes.isEmpty()) return;
         try {
-            JSONObject fields = new JSONObject();
-            JSONArray mask = new JSONArray();
-            for (Map.Entry<String, Object> e : values.entrySet()) {
-                JSONObject v = new JSONObject();
-                if (e.getValue() instanceof String) v.put("stringValue", e.getValue());
-                else v.put("integerValue", String.valueOf(((Number) e.getValue()).longValue()));
-                fields.put(e.getKey(), v);
-                mask.put(e.getKey());
+            JSONArray arr = new JSONArray();
+            for (Write w : writes) {
+                JSONObject fields = new JSONObject();
+                JSONArray mask = new JSONArray();
+                for (Map.Entry<String, Object> e : w.values.entrySet()) {
+                    JSONObject v = new JSONObject();
+                    if (e.getValue() instanceof String) v.put("stringValue", e.getValue());
+                    else v.put("integerValue", String.valueOf(((Number) e.getValue()).longValue()));
+                    fields.put(e.getKey(), v);
+                    mask.put(e.getKey());
+                }
+                JSONObject update = new JSONObject()
+                        .put("name", root() + "/" + w.path)
+                        .put("fields", fields);
+                arr.put(new JSONObject().put("update", update)
+                        .put("updateMask", new JSONObject().put("fieldPaths", mask)));
             }
-            JSONObject update = new JSONObject()
-                    .put("name", root() + "/" + docPath)
-                    .put("fields", fields);
-            JSONObject w = new JSONObject().put("update", update)
-                    .put("updateMask", new JSONObject().put("fieldPaths", mask));
-            JSONObject body = new JSONObject().put("writes", new JSONArray().put(w));
             request("POST", "https://firestore.googleapis.com/v1/" + root() + ":commit?key=" + apiKey,
-                    body.toString());
+                    new JSONObject().put("writes", arr).toString());
         } catch (JSONException e) {
             throw new IOException(e.getMessage());
         }
