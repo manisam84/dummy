@@ -132,6 +132,28 @@ Uploaded: device type and model, app names and packages, and today's and the wee
 Anyone who knows your project ID, API key **and** pairing code can read or change them, so keep the
 code private.
 
+## Timer
+
+A countdown timer that runs on **one device only** (nothing goes to Firebase).
+
+1. Enter the minutes (1 to 1,440) and tap **Start timer**.
+2. The screen shows the time left and the end time.
+3. When the time is up, the device shows a full-screen **"Time is up"** message. **Close** (or Back) takes you
+   to the home screen.
+
+What it does **not** do: it does not lock the phone and it does not shut down the TV. A normal Android app
+cannot power off a TV, and a phone lock needs extra permissions that were not chosen.
+
+Good to know:
+- **No warning, and it cannot be stopped.** Only force-closing the app or restarting the device removes it.
+  The app then says the timer was missed the next time you open it.
+- **Allow "Display over other apps"** (the app shows a button for it). Without it, Android may not let the
+  "Time is up" screen open over another app; the app then posts a "Time is up" notification instead.
+- On a TV with no such Settings screen, grant it from a computer:
+  `adb shell appops set com.example.apptimetracker SYSTEM_ALERT_WINDOW allow`
+- The "Time is up" screen can be closed on purpose, so it can never lock you out.
+- The timer uses an alarm-clock alarm, so an alarm icon may show in the status bar while it runs.
+
 ## Updating and TV notes
 
 - Every build is signed with the same fixed key (`android/app/debug.keystore`), so a new APK installs

@@ -17,6 +17,7 @@ final class Config {
     static final String DEVICE_ID = "device_id";
     static final String APPS_CACHE = "apps_cache";    // last app list read from Firebase
     static final String INTERVAL = "interval_min";    // last check interval read from Firebase
+    static final String TIMER_END = "timer_end";      // when the countdown timer ends (ms), empty if none
 
     private static SharedPreferences prefs(Context c) {
         return c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);

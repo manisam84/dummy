@@ -8,7 +8,10 @@ import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Color;
 import android.os.Build;
+import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
@@ -19,8 +22,10 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import java.text.DateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -40,8 +45,18 @@ public class MainActivity extends Activity {
     private boolean isTv;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
 
-    private TextView deviceView, appsView, noteView;
-    private Button grantButton, updateButton, chooseButton, syncButton;
+    private TextView deviceView, appsView, noteView, timerView;
+    private Button grantButton, updateButton, chooseButton, syncButton, startTimerButton, overlayButton;
+    private EditText minutesField;
+
+    // Counts the timer down once a second, only while this screen is visible
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable ticker = new Runnable() {
+        @Override public void run() {
+            refreshTimer();
+            if (TimerManager.endTime(MainActivity.this) > 0) handler.postDelayed(this, 1000);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -61,11 +76,19 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         refreshLocal(); // just this device, no network; also runs when coming back from Settings
+        handler.removeCallbacks(ticker);
+        handler.post(ticker); // timer display
         if (Config.syncConfigured(this) && Usage.hasAccess(this)) {
             SyncJobService.ensureSchedule(this, Config.intervalMinutes(this));
         } else {
             SyncJobService.cancel(this);
         }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        handler.removeCallbacks(ticker);
     }
 
     @Override
@@ -94,6 +117,15 @@ public class MainActivity extends Activity {
         appsView = text(18 * scale, "#FFFFFF", false);
         noteView = text(14 * scale, "#AAAAAA", false);
 
+        TextView timerTitle = text(20 * scale, "#FFFFFF", true);
+        timerTitle.setText("Timer");
+        timerView = text(16 * scale, "#FFCC66", false);
+        minutesField = field("Minutes (" + TimerManager.MIN_MINUTES + " to " + TimerManager.MAX_MINUTES + ")",
+                "30", InputType.TYPE_CLASS_NUMBER);
+        minutesField.setGravity(Gravity.CENTER);
+        startTimerButton = button("Start timer", v -> startTimer());
+        overlayButton = button("Allow display over other apps", v -> openOverlaySettings());
+
         grantButton = button("Grant Usage access", v -> openUsageAccessSettings());
         updateButton = button("Update usage", v -> updateNow());
         chooseButton = button("Add / choose app", v -> showAppPicker());
@@ -103,6 +135,11 @@ public class MainActivity extends Activity {
         root.addView(updateButton);
         root.addView(grantButton);
         root.addView(appsView);
+        root.addView(timerTitle);
+        root.addView(minutesField);
+        root.addView(startTimerButton);
+        root.addView(timerView);
+        root.addView(overlayButton);
         root.addView(chooseButton);
         root.addView(syncButton);
         root.addView(noteView);
@@ -312,6 +349,78 @@ public class MainActivity extends Activity {
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    // -------------------------------------------------------------- Timer
+
+    /** Whether the app may show things over other apps (needed for the "Time is up" screen). */
+    private boolean canShowOverApps() {
+        return Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this);
+    }
+
+    private void startTimer() {
+        if (TimerManager.endTime(this) > 0) return; // one timer at a time; it cannot be stopped
+
+        int minutes;
+        try {
+            minutes = Integer.parseInt(minutesField.getText().toString().trim());
+        } catch (NumberFormatException e) {
+            minutes = -1;
+        }
+        if (minutes < TimerManager.MIN_MINUTES || minutes > TimerManager.MAX_MINUTES) {
+            timerView.setText("Enter minutes from " + TimerManager.MIN_MINUTES + " to "
+                    + TimerManager.MAX_MINUTES + ".");
+            return;
+        }
+
+        boolean exact = TimerManager.start(this, minutes);
+        handler.removeCallbacks(ticker);
+        handler.post(ticker);
+        noteView.setText("Timer started for " + minutes + " min. It cannot be stopped."
+                + (exact ? "" : " This device may end it a little late.")
+                + (canShowOverApps() ? ""
+                : " Allow \"Display over other apps\" so the \"Time is up\" screen can appear."));
+    }
+
+    /** Updates the timer text and buttons from the saved end time. */
+    private void refreshTimer() {
+        overlayButton.setVisibility(canShowOverApps() ? View.GONE : View.VISIBLE);
+
+        long end = TimerManager.endTime(this);
+        long now = System.currentTimeMillis();
+        boolean running = end > now;
+        startTimerButton.setEnabled(!running && end <= 0);
+        minutesField.setEnabled(!running && end <= 0);
+
+        if (running) {
+            timerView.setText("Time left: " + clock(end - now) + "   (ends "
+                    + DateFormat.getTimeInstance(DateFormat.SHORT).format(new Date(end)) + ")");
+        } else if (end > 0 && TimerManager.wasMissed(this)) {
+            TimerManager.clear(this);
+            timerView.setText("The last timer was missed: the app was force-closed or the device restarted.");
+        } else if (end > 0) {
+            timerView.setText("Time is up…"); // the alarm is about to arrive
+        } else {
+            timerView.setText("No timer running.");
+        }
+    }
+
+    private static String clock(long ms) {
+        long s = Math.max(0, ms) / 1000, h = s / 3600, m = (s % 3600) / 60, sec = s % 60;
+        return h > 0 ? String.format(java.util.Locale.US, "%d:%02d:%02d", h, m, sec)
+                : String.format(java.util.Locale.US, "%02d:%02d", m, sec);
+    }
+
+    /** Opens the "Display over other apps" screen; some TVs have none, so explain instead of crashing. */
+    private void openOverlaySettings() {
+        if (Build.VERSION.SDK_INT < 23) return;
+        try {
+            startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + getPackageName())));
+        } catch (ActivityNotFoundException e) {
+            noteView.setText("This device has no \"Display over other apps\" screen. On a computer, run:\n"
+                    + "adb shell appops set " + getPackageName() + " SYSTEM_ALERT_WINDOW allow");
+        }
     }
 
     // ------------------------------------------------------ App selection
