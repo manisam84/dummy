@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android TV home-screen banner (320x180dp). Without one, TV launchers can hide the app. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    <path
+        android:fillColor="#0F0F0F"
+        android:pathData="M0,0h320v180h-320z" />
+    <path
+        android:fillColor="#FF3355"
+        android:pathData="M110,90a50,50 0 1,0 100,0a50,50 0 1,0 -100,0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M148,68L148,112L184,90z" />
+</vector>
