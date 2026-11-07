@@ -4,8 +4,9 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.AppOpsManager;
 import android.app.UiModeManager;
-import android.app.usage.UsageStats;
+import android.app.usage.UsageEvents;
 import android.app.usage.UsageStatsManager;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -14,6 +15,8 @@ import android.content.pm.ResolveInfo;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.Process;
 import android.provider.Settings;
 import android.view.Gravity;
@@ -29,6 +32,8 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Shows how much time a chosen app (default: YouTube) was used on THIS device,
@@ -38,12 +43,22 @@ public class MainActivity extends Activity {
 
     private static final String PREFS = "prefs";
     private static final String KEY_PKG = "target_pkg";
+    private static final long AUTO_REFRESH_MS = 30_000;
 
     private boolean isTv;
     private SharedPreferences prefs;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final ExecutorService io = Executors.newSingleThreadExecutor();
 
     private TextView deviceView, appView, todayView, weekView, noteView;
     private Button actionButton, chooseButton;
+
+    private final Runnable autoRefresh = new Runnable() {
+        @Override public void run() {
+            refresh();
+            handler.postDelayed(this, AUTO_REFRESH_MS);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -60,14 +75,30 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        refresh(); // also runs when coming back from the Usage access screen
+        handler.post(autoRefresh); // refreshes now (also after returning from Settings), then every 30s
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        handler.removeCallbacks(autoRefresh);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        io.shutdownNow();
     }
 
     // ---------------------------------------------------------------- UI
 
+    private int dp(float v) {
+        return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
     private void buildUi() {
         float scale = isTv ? 1.6f : 1f;
-        int pad = (int) (24 * getResources().getDisplayMetrics().density * scale);
+        int pad = dp(24 * scale);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -83,8 +114,7 @@ public class MainActivity extends Activity {
 
         actionButton = new Button(this);
         actionButton.setText("Grant Usage access");
-        actionButton.setOnClickListener(v ->
-                startActivity(new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)));
+        actionButton.setOnClickListener(v -> openUsageAccessSettings());
 
         chooseButton = new Button(this);
         chooseButton.setText("Choose app");
@@ -102,7 +132,6 @@ public class MainActivity extends Activity {
         scroll.setFillViewport(true);
         scroll.addView(root);
         setContentView(scroll);
-        chooseButton.requestFocus(); // so TV remotes have a starting focus
     }
 
     private TextView text(float sp, String color, boolean bold) {
@@ -110,9 +139,19 @@ public class MainActivity extends Activity {
         t.setTextSize(sp);
         t.setTextColor(Color.parseColor(color));
         t.setGravity(Gravity.CENTER);
-        t.setPadding(0, 12, 0, 12);
+        t.setPadding(0, dp(6), 0, dp(6));
         if (bold) t.setTypeface(null, android.graphics.Typeface.BOLD);
         return t;
+    }
+
+    /** Opens the Usage access screen; some TVs don't have one, so explain instead of crashing. */
+    private void openUsageAccessSettings() {
+        try {
+            startActivity(new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS));
+        } catch (ActivityNotFoundException e) {
+            noteView.setText("This device has no Usage access screen. On a computer, run:\n"
+                    + "adb shell appops set " + getPackageName() + " GET_USAGE_STATS allow");
+        }
     }
 
     // -------------------------------------------------------------- Logic
@@ -120,46 +159,115 @@ public class MainActivity extends Activity {
     private void refresh() {
         deviceView.setText(isTv ? "📺 Running on: TV" : "📱 Running on: Mobile");
 
-        String pkg = getTargetPackage();
+        final boolean access = hasUsageAccess();
+        actionButton.setVisibility(access ? View.GONE : View.VISIBLE);
+        // First-run flow: focus the required step; afterwards focus "Choose app" (matters for TV remotes)
+        (access ? chooseButton : actionButton).requestFocus();
+
+        final String pkg = getTargetPackage();
         if (pkg == null) {
             appView.setText("No app selected");
             todayView.setText("");
             weekView.setText("");
             noteView.setText("Tap \"Choose app\" to pick the app you want to track.");
-            actionButton.setVisibility(hasUsageAccess() ? View.GONE : View.VISIBLE);
             return;
         }
         appView.setText(labelFor(pkg));
 
-        if (!hasUsageAccess()) {
+        if (!access) {
             todayView.setText("");
             weekView.setText("");
             noteView.setText("One-time step: tap the button, find \"App Time Tracker\" "
                     + "in the list and switch it on. Then come back.");
-            actionButton.setVisibility(View.VISIBLE);
             return;
         }
 
-        actionButton.setVisibility(View.GONE);
-        long now = System.currentTimeMillis();
-        todayView.setText("Today: " + format(foregroundMs(pkg, startOfDay(0), now)));
-        weekView.setText("Last 7 days: " + format(foregroundMs(pkg, startOfDay(6), now)));
-        noteView.setText("Time is read from Android's own usage data on this "
-                + (isTv ? "TV" : "phone") + ".");
+        final long now = System.currentTimeMillis();
+        final long dayStart = startOfDay(0);
+        final long weekStart = startOfDay(6);
+        // Reading usage events can be slow on devices with a lot of history, so do it off the UI thread.
+        try {
+            io.execute(() -> {
+                final long[] result = foregroundMs(pkg, weekStart, dayStart, now);
+                runOnUiThread(() -> {
+                    if (isFinishing() || !pkg.equals(getTargetPackage())) return;
+                    if (result == null) {
+                        todayView.setText("");
+                        weekView.setText("");
+                        noteView.setText("Could not read usage data. Check that Usage access is on.");
+                        return;
+                    }
+                    todayView.setText("Today: " + format(result[0]));
+                    weekView.setText("Last 7 days: " + format(result[1]));
+                    noteView.setText("Time is read from Android's own usage data on this "
+                            + (isTv ? "TV" : "phone") + ". Updates every 30 seconds.");
+                });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) { }
     }
 
     private boolean hasUsageAccess() {
         AppOpsManager ops = (AppOpsManager) getSystemService(Context.APP_OPS_SERVICE);
         int mode = ops.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS,
                 Process.myUid(), getPackageName());
+        if (mode == AppOpsManager.MODE_DEFAULT) {
+            // Some devices report MODE_DEFAULT even when the user has enabled access
+            return checkCallingOrSelfPermission(android.Manifest.permission.PACKAGE_USAGE_STATS)
+                    == PackageManager.PERMISSION_GRANTED;
+        }
         return mode == AppOpsManager.MODE_ALLOWED;
     }
 
-    private long foregroundMs(String pkg, long from, long to) {
-        UsageStatsManager usm = (UsageStatsManager) getSystemService(Context.USAGE_STATS_SERVICE);
-        Map<String, UsageStats> stats = usm.queryAndAggregateUsageStats(from, to);
-        UsageStats s = stats == null ? null : stats.get(pkg);
-        return s == null ? 0 : s.getTotalTimeInForeground();
+    /**
+     * Exact foreground time for pkg, computed from foreground/background events.
+     * One pass over the last 7 days gives both figures.
+     *
+     * @return {todayMs, weekMs}, or null if usage data could not be read
+     */
+    @SuppressWarnings("deprecation")
+    private long[] foregroundMs(String pkg, long weekStart, long dayStart, long now) {
+        try {
+            UsageStatsManager usm = (UsageStatsManager) getSystemService(Context.USAGE_STATS_SERVICE);
+            UsageEvents events = usm.queryEvents(weekStart, now);
+            if (events == null) return null;
+
+            UsageEvents.Event e = new UsageEvents.Event();
+            long[] totals = new long[2]; // [today, week]
+            long start = -1;
+            boolean first = true;
+
+            while (events.hasNextEvent()) {
+                events.getNextEvent(e);
+                if (!pkg.equals(e.getPackageName())) continue;
+                int type = e.getEventType();
+                long ts = e.getTimeStamp();
+
+                if (type == UsageEvents.Event.MOVE_TO_FOREGROUND) {
+                    if (start < 0) start = ts;
+                } else if (type == UsageEvents.Event.MOVE_TO_BACKGROUND) {
+                    // If the first thing we see is "went to background", the app was
+                    // already in the foreground when the window began.
+                    if (start < 0 && first) start = weekStart;
+                    if (start >= 0) {
+                        addInterval(totals, start, ts, dayStart);
+                        start = -1;
+                    }
+                } else {
+                    continue;
+                }
+                first = false;
+            }
+            if (start >= 0) addInterval(totals, start, now, dayStart); // still open right now
+            return totals;
+        } catch (SecurityException ex) {
+            return null;
+        }
+    }
+
+    private static void addInterval(long[] totals, long start, long end, long dayStart) {
+        if (end <= start) return;
+        totals[1] += end - start;
+        totals[0] += Math.max(0, end - Math.max(start, dayStart));
     }
 
     private long startOfDay(int daysAgo) {

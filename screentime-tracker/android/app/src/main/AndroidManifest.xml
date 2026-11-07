@@ -24,6 +24,8 @@
 
     <application
         android:label="App Time Tracker"
+        android:icon="@drawable/ic_launcher"
+        android:banner="@drawable/banner"
         android:theme="@android:style/Theme.Material.NoActionBar">
         <activity
             android:name=".MainActivity"

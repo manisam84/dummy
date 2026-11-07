@@ -58,6 +58,15 @@ screentime-tracker/
   index.html                         Old web prototype
 ```
 
+## Updating and TV notes
+
+- Every build is signed with the same fixed key (`android/app/debug.keystore`), so a new APK installs
+  over the old one and keeps your settings. If you installed the **very first** build, uninstall it once;
+  it used a different key.
+- If your TV has no "Usage access" screen, the app shows an `adb` command that grants it from a computer:
+  `adb shell appops set com.example.apptimetracker GET_USAGE_STATS allow`
+- Time is calculated exactly from Android's foreground/background events and refreshes every 30 seconds.
+
 ## Limits
 
 - Phone and TV each show their own numbers. A combined view needs a backend or account.
