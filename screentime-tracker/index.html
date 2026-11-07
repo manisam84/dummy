@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>App Time Tracker</title>
+<style>
+  :root { --bg:#0f0f0f; --card:#1c1c1c; --fg:#f1f1f1; --muted:#aaa; --accent:#ff0033; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg);
+         display:flex; flex-direction:column; align-items:center; padding:24px 16px; }
+  h1 { margin:0 0 4px; font-size:1.6rem; }
+  .sub { color:var(--muted); margin-bottom:20px; }
+  .badge { display:inline-block; padding:4px 12px; border-radius:999px; background:var(--accent); font-weight:600; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; width:100%; max-width:640px; margin-top:20px; }
+  .card { background:var(--card); border-radius:14px; padding:20px; text-align:center; }
+  .card.active { outline:2px solid var(--accent); }
+  .card h2 { margin:0 0 8px; font-size:1rem; color:var(--muted); }
+  .time { font-size:2rem; font-variant-numeric:tabular-nums; }
+  .total { width:100%; max-width:640px; margin-top:16px; }
+  button { margin-top:24px; background:transparent; color:var(--muted); border:1px solid #444;
+           border-radius:8px; padding:8px 16px; cursor:pointer; }
+  button:focus { outline:2px solid var(--accent); }
+  /* bigger text on TV */
+  body.tv { font-size:1.5rem; }
+  body.tv .time { font-size:3.5rem; }
+</style>
+</head>
+<body>
+  <h1 id="appName">YouTube</h1>
+  <div class="sub">Running on: <span class="badge" id="deviceBadge">…</span></div>
+
+  <div class="grid">
+    <div class="card" id="card-mobile"><h2>📱 Mobile</h2><div class="time" id="t-mobile">0s</div></div>
+    <div class="card" id="card-tv"><h2>📺 TV</h2><div class="time" id="t-tv">0s</div></div>
+  </div>
+  <div class="card total"><h2>Total</h2><div class="time" id="t-total">0s</div></div>
+
+  <button id="reset">Reset</button>
+
+<script>
+// ---- Config: the app being tracked. Change this to track a different "app". ----
+const APP_NAME = "YouTube";
+
+// ---- Detect TV vs mobile ----
+function detectDevice() {
+  const ua = navigator.userAgent.toLowerCase();
+  const tvHints = ["smart-tv","smarttv","tizen","web0s","webos","appletv","googletv",
+                   "android tv","aftb","aftm","aft","crkey","hbbtv","netcast","viera","bravia","roku"];
+  if (tvHints.some(h => ua.includes(h))) return "tv";
+  // Large landscape screen with no touch is treated as TV
+  if (screen.width >= 1280 && !("ontouchstart" in window) && !matchMedia("(pointer:fine)").matches) return "tv";
+  return "mobile";
+}
+
+const device = detectDevice();
+const KEY = "apptime:" + APP_NAME;
+
+// ---- Storage: { mobile: ms, tv: ms } ----
+function load() {
+  try { return Object.assign({mobile:0, tv:0}, JSON.parse(localStorage.getItem(KEY))); }
+  catch { return {mobile:0, tv:0}; }
+}
+function save(d) { try { localStorage.setItem(KEY, JSON.stringify(d)); } catch {} }
+
+let data = load();
+let lastTick = document.hidden ? null : Date.now();
+
+// Add elapsed foreground time to this device's bucket
+function tick() {
+  const now = Date.now();
+  if (lastTick !== null) {
+    data = load();                      // re-read in case another tab updated it
+    data[device] += now - lastTick;
+    save(data);
+  }
+  lastTick = document.hidden ? null : now;
+  render();
+}
+
+function fmt(ms) {
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h ? `${h}h ${m}m ${sec}s` : m ? `${m}m ${sec}s` : `${sec}s`;
+}
+
+function render() {
+  document.getElementById("t-mobile").textContent = fmt(data.mobile);
+  document.getElementById("t-tv").textContent = fmt(data.tv);
+  document.getElementById("t-total").textContent = fmt(data.mobile + data.tv);
+}
+
+// ---- Init UI ----
+document.title = APP_NAME + " Time Tracker";
+document.getElementById("appName").textContent = APP_NAME;
+document.getElementById("deviceBadge").textContent = device === "tv" ? "📺 TV" : "📱 Mobile";
+document.getElementById("card-" + device).classList.add("active");
+if (device === "tv") document.body.classList.add("tv");
+
+// Only count while the app is visible/foreground
+document.addEventListener("visibilitychange", tick);
+window.addEventListener("pagehide", tick);
+setInterval(tick, 1000);
+document.getElementById("reset").onclick = () => { data = {mobile:0, tv:0}; save(data); lastTick = Date.now(); render(); };
+render();
+</script>
+</body>
+</html>
